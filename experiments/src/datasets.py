@@ -161,3 +161,70 @@ class ProportionMnistBags(Dataset):
             y = self.y[idx].squeeze(1)
 
         return self.x[idx].unsqueeze(1).float(), y.float()
+
+### --- CAMELYON16 DATASET DEFINITION --- ###
+
+class CAMELYON16UNI2Embeddings(Dataset):
+    """Dataset of CAMELYON16 whole slide images (WSIs) as bags of patches.
+
+    See ___ for specification of data file schema.
+
+    """
+    def __init__(
+            self,
+            directory: Union[Path | list[Path]],
+            labels_by_instance: bool = False,
+            with_caching: bool = False,
+            device: str = "cpu"
+    ) -> None:
+        """Load in directory of data as PyTorch dataset.
+
+        Args:
+            directory (Path): Folder containing .pt files where each .pt file
+                corresponds to a CAMELYON16 WSI whose patches (256x256) are
+                embedded by UNI2-H.
+            labels_by_instance (bool): Retrieved label will be on the instance
+                level instead of bag-level (slide).
+            with_caching (bool): Use caching for faster retrieval if memory
+                capacity allows.
+            device (str): custom arg available on the Dataset level to load
+                .pt files onto specific device.
+        """
+        # If `directory` is NOT a Path object, it is assumed to be a
+        # pre-filtered list of files (Path objects)
+        self.files = (
+            list(directory.glob("*.pt")) if isinstance(directory, Path)
+            else directory
+        )
+        self.labels_by_instance = labels_by_instance
+        self.use_caching = with_caching
+        self.device = device
+        self.cache = {}
+
+    def __len__(self):
+        """Return number of bags."""
+        return len(self.files)
+
+    def __getitem__(self, idx: int) -> th.Tensor:
+        """Get specific slide from files and the UNI2-H embeddings of patches.
+
+        Args:
+            idx (int): Index of WSI in self.files.
+
+        """
+        data = (
+            th.load(
+                self.files[idx],
+                weights_only = True,
+                map_location = self.device
+            )
+        )
+
+        labels = data['labels'].unsqueeze(1)
+        embeddings = data['features']
+        label = (
+            labels if self.self.labels_by_instance
+            else th.max(labels, dim = 0, keepdim = False).values
+        )
+
+        return embeddings.float(), label.float()
