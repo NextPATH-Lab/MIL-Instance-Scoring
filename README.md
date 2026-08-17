@@ -20,7 +20,7 @@ The proportion MNIST bags dataset is created using the MNIST dataset, available 
 The proportion MNSIT bags dataset is created in the `experiment-promnist-bags.py` script.
 
 #### 2. Prostate Cancer LDO Dataset
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21983424.svg)](https://doi.org/10.5281/zenodo.21983424)  
+[![DOI](https://shields.io)](https://doi.org/10.5281/zenodo.21983424)
 LDO features are computed from segmented nuclei of Feulgen-thionin stained prostate core needle biopsies.
 The collection of features for each patient can be accessed above.
 After download, the data should be formatted in the following manner:
