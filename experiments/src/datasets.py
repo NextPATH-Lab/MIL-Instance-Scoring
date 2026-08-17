@@ -1,17 +1,17 @@
 """Definition of various datasets used in experiments.
 
 """
-import time
+import json
 from pathlib import Path
-from typing import Union, Literal
+from typing import Union, Literal, Optional
 
-import zarr
 import numpy as np
+import polars as pl
+from sklearn.preprocessing import StandardScaler
+
 import torch as th
 from torch.utils.data import Dataset
-
 from torchvision import datasets, transforms
-
 
 class ProportionMnistBags(Dataset):
     """Class to generate proportion mnist bags dataset."""
@@ -161,3 +161,119 @@ class ProportionMnistBags(Dataset):
             y = self.y[idx].squeeze(1)
 
         return self.x[idx].unsqueeze(1).float(), y.float()
+
+"""
+Structure of data:
+1.  Initially, each whole slide image (WSI) is an individual .cmg file, 
+    containing segmented nuclei and binary masks. Large-scale DNA Organization
+    (LDO) features are calculated for each file in .mc0 files.
+    For data cleaning purposes, features quantifying cell overlaps are also
+    computed, hence requiring files to be kept within each WSI.
+
+2.  Following file cleaning, all .cmg.mc0 files for each patient are merged
+    into one file for multiple instance learning. The structure of these files
+    are .pt files, and are structured as follows:
+
+    {
+        "feature_names" : list[str]
+        "tensor" : torch.Tensor (NxD),
+    }
+    The torch tensor should already contain all clinical information/variables
+    of interest in it.
+
+3.  The `LDODataset` instance takes a `config.json` parameter to generate the
+    dataset. The config.json should be formatted as the following:
+
+    {
+        "feature_names" : list[str]
+        "feature_idx" : list[int]
+        "target_name" : str
+        "target_idx" : int
+    }
+
+    feature_names is a list of feature names from the polars dataframe, and 
+    feature_idx is the corresponding integer indices of the columns. 
+    target_name is the name of the column which we are trying to predict, and
+    target_idx is the corresponding integer index of the target column.
+"""
+
+class LDODataset(Dataset):
+    def __init__(
+            self,
+            file_directory: str | Path | list[Path | str],
+            config_file: Optional[str | Path | dict] = None,
+            use_caching: bool = False,
+            normalizer: Optional[StandardScaler] = None,
+            filter_condition: Optional[pl.Expr] = None
+    ) -> None:
+        """Load data directory
+
+        Args:
+            file_directory (Path): _description_
+        """
+        self.files = (
+            list(file_directory.glob("*.pt")) 
+            if isinstance(file_directory, Path)
+            else file_directory
+        )
+
+        self.cache = {}
+        self.use_cache = use_caching
+        self.normalizer = (
+            normalizer.set_output("polars")
+            if isinstance(normalizer, StandardScaler)
+            else lambda x: x
+        )
+        self.filter_condition = filter_condition
+
+        if isinstance(config_file, dict):
+            self.config = config_file
+
+        elif config_file is not None:
+            with open(config_file, "r") as f:
+                self.config = json.load(f)
+        else:
+            # Currently errors
+            self.config = {}
+
+    def __len__(self) -> int:
+        return len(self.files)
+
+    def __getitem__(
+            self,
+            idx: int,
+            filter_condn: Optional[pl.Expr] = None
+    ) -> th.Tensor:
+        # filter_condn is a per-call override; only results computed with the
+        # dataset's fixed self.filter_condition are safe to cache by idx alone.
+        cacheable = self.use_cache and filter_condn is None
+        if cacheable:
+            cached = self.cache.get(idx, None)
+            if cached is not None:
+                return cached
+
+        _data = pl.read_csv(self.files[idx])
+
+        # Extract feature data
+        # Filter condition - prioritize one given as arg
+        if filter_condn is not None:
+            _data = _data.filter(filter_condn)
+        elif self.filter_condition is not None:
+            _data = _data.filter(self.filter_condition)
+
+        data = _data.select(self.config['feature_names'])
+        data = self.normalizer(data)
+        data = data.to_torch().float()
+
+        # Extract label data
+        _label = (
+            _data.get_column(self.config['target_name'])
+                .to_torch().float()[[0]]
+        )
+
+        result = (data, _label)
+
+        if cacheable:
+            self.cache[idx] = result
+
+        return result
