@@ -143,7 +143,7 @@ class ProportionMnistBags(Dataset):
             neg_ptr += n_negative_instances
 
             # Update stats
-            empirical_prop = len(pos_idx) / (len(pos_idx) + len(neg_idx))
+            empirical_prop = len(pos_idx) / max(len(pos_idx) + len(neg_idx), 1)
             dist_pos_prop[int(bag_is_pos)] += [round(empirical_prop, 4)]
 
             if pos_ptr > len(target_idx) or neg_ptr > len(non_target_idx):

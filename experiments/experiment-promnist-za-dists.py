@@ -3,6 +3,9 @@ Get the distribution of instance logit x attention from
 all datasets generated in `experiment-promnist-bags.py`
 """
 
+from dotenv import load_dotenv
+load_dotenv(override = True)
+
 import re, logging, os
 from pathlib import Path
 from datetime import datetime

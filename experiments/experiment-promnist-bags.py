@@ -3,6 +3,8 @@
 
 """
 # ==== HYPERPARAMETERS OF EXPERIMENTATION ==== #
+from pathlib import Path
+
 # ======== EDIT VARIABLES HERE ======== #
 BAG_SIZE = 20
 SEEDS_TO_TEST = [2380, 1780, 0, 100, 260115]
@@ -14,7 +16,6 @@ DATA_SAVE_DIR.mkdir(exist_ok = True, parents = True)
 # Short-hand to import Native Python Deps
 import re, os, json, time, random, logging, warnings
 from tqdm import tqdm
-from pathlib import Path
 from datetime import datetime
 from itertools import product
 from dotenv import load_dotenv
@@ -111,6 +112,10 @@ for (t, s) in tqdm(taus_with_seeds, total = len(taus_with_seeds)):
     if match:
         tau_str = match.group(1)
         tau = float(tau_str[0] + "." + tau_str[1:])
+
+    log.info(
+        f"Starting iteration with {tau=}, {dataset_seed=}, model seed: {s}"
+    )
 
     train_ds = th.load(t, weights_only = False)
     train_loader = DataLoader(train_ds, batch_size = 1)

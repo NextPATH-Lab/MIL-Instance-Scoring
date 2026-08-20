@@ -4,11 +4,13 @@ Definition of attention modules for multiple instance learning (MIL).
 `MILAttention` is the primary exposed class, which serves as a wrapper for
 different modes of attention.
 """
+import logging
 from itertools import chain
 from typing import Literal, Generator
 
 import torch as th
 from torch import nn
+log = logging.getLogger()
 
 class GatedAttention(nn.Module):
     """Gated attention module as per Ilse et al. 2018
@@ -123,12 +125,14 @@ class MILAttention(nn.Module):
         if self.num_branches > 1:
             attn = self.reduction_func(attn)
 
-        if softmax and transpose:
-            return th.softmax(th.transpose(attn, 1, 0), dim = 1)
-        elif softmax:
-            return th.softmax(attn, dim = 0)
-        elif transpose:
-            return th.transpose(attn, 1, 0)
+        if attn.ndim == 1:
+            log.info(f"Attention vector shape: {attn.shape}. Unsqueezing dim 1")
+            attn = attn.unsqueeze(1)
+
+        if softmax:
+            attn = th.softmax(attn, dim = 0)
+        if transpose:
+            attn = th.transpose(attn, 1, 0)
         return attn
 
     def get_first_layer(self) -> Generator[th.Tensor, None, None]:

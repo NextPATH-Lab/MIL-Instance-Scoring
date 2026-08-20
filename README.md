@@ -58,6 +58,7 @@ The location of `data_folder` should be saved in the `.env` file.
 ### **Table of Contents for Experiments**
 1. [Proportion MNIST Bags Experiment](#1-proportion-mnist-bags-experiment)
 2. [Proportion MNIST Bags - Instance Logit \& Attention](#2-proportion-mnist-bags---instance-logit--attention)
+3. [Proportion MNIST Bags - Create Figures](#3-create-figures-for-proportion-mnist-bags-experiments)
 3. [CAMELYON16 Embedding Generation](#1-camelyon16-embedding-generation)
 4. [CAMELYON16 Model Training](#2-training-abmilite-on-uni2-h-embeddings)
 5. [Bootstrapped Uncertainty of Instance-level Scoring](#3-bootstrapped-uncertainty-of-instance-level-scoring)
@@ -74,6 +75,9 @@ This script should be run first.
 #### 2. Proportion MNIST Bags - Instance Logit & Attention
 This script (`experiment-promnist-za-dists.py`) creates another `.csv` file to be used for plotting instance attention against instance logit for specific datasets with different $\tau$ values.
 This relies on the datasets created in the part above, so should be run after (`experiment-promnist-bags.py`).
+
+#### 3. Create Figures for Proportion MNIST Bags Experiments
+Finally, use the `figures-promnist.py` script to generate figures from the tables created in the previous two scripts.
 
 ### **UNI2-H CAMELYON16 Embeddings**
 #### 1. CAMELYON16 Embedding Generation
