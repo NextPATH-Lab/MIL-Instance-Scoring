@@ -26,10 +26,13 @@ from dotenv import load_dotenv
 load_dotenv(override = True)
 SEED = os.getenv("SEED")
 DEVICE = os.getenv("ACCELERATION_DEVICE")
-LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR"))
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "LDO-Prostate"
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR"))
-OUTPUTS_DIR = Path(os.getenv("OUTPUTS_DIR"))
+OUTPUTS_DIR = Path(os.getenv("OUTPUTS_DIR")) / "LDO-Prostate"
 TRAINING_DATA_DIR = Path(os.getenv("TRAINING_DATA_DIR"))
+
+LOG_DIR.mkdir(parents = True, exist_ok = True)
+(OUTPUTS_DIR / "figures").mkdir(exist_ok = True, parents = True)
 
 log = logging.getLogger(__name__)
 now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
@@ -278,7 +281,6 @@ ax_ft_impt.set_xticks(
 ax_ft_impt.set_ylabel("Parameter Value (Classifier Head)")
 
 # >> Save All Figures
-(OUTPUTS_DIR / "figures").mkdir(exist_ok = True, parents = True)
 f_loss.savefig(
     OUTPUTS_DIR / "figures/abmilite_loss.png",
     dpi = 100,

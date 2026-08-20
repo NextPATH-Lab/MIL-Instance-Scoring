@@ -98,7 +98,7 @@ class ABMILite(nn.Module):
         x = self.encode(x)
         z = self.classifier(x)
         a = self.attention_module(x, softmax = False, transpose = False)
-        za = th.cat([z, a], dims = 1)
+        za = th.cat([z, a], dim = 1)
         return za
 
     def forward(

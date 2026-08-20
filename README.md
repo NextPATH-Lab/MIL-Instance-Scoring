@@ -1,9 +1,12 @@
 # Instance Attention is Misleading: Bag Composition Affects Interpretability in Digital Pathology Multiple Instance Learning
+![Status](https://img.shields.io/badge/Manuscript-under%20review-yellow)
+![Status](https://img.shields.io/badge/Testing%20Status-in%20progress-yellow)  
 Previously *Instance Scoring via Distillation of Multiple Instance Classifiers for Interpretable Digital Pathology*  
 
 This repository houses code for the following related publications:
 * **SPIE Journal of Medical Imaging (*under review*)** Instance Attention is Misleading: Bag Composition Affects Interpretability in Digital Pathology Multiple Instance Learning
-* Fumiya Inaba, Mira Keyes, Calum MacAulay, Martial Guillaud. "Instance scoring via distillation of multiple instance classifiers for interpretable digital pathology", Proc. SPIE 13932, Medical Imaging 2026: Digital and Computational Pathology, 1393205 (2 Apr 2026); https://doi.org/10.1117/12.3087751
+* Fumiya Inaba, Mira Keyes, Calum MacAulay, Martial Guillaud. "Instance scoring via distillation of multiple instance classifiers for interpretable digital pathology", Proc. SPIE 13932, Medical Imaging 2026: Digital and Computational Pathology, 1393205 (2 Apr 2026); 
+[![DOI](https://img.shields.io/badge/DOI-10.1117%2F12.3087751-blue)](https://doi.org/10.1117/12.3087751)  
 
 ## Experimentation
 ### Setting up environment
@@ -50,3 +53,13 @@ This script should be run first.
 #### 2. Proportion MNIST Bags - Instance Logit & Attention
 This script (`experiment-promnist-za-dists.py`) creates another `.csv` file to be used for plotting instance attention against instance logit for specific datasets with different $\tau$ values.
 This relies on the datasets created in the part above, so should be run after (`experiment-promnist-bags.py`).
+
+### **UNI2-H CAMELYON16 Embeddings**
+
+
+### **Large-scale DNA Organization (LDO) for Prostate Cancer**
+#### 1. LDO Feature Selection
+Use the `utils-ldo-feature-selection.py` script to remove features with redundancies (high Pearson correlation `>0.9`). This will create a new folder within the data directory called `filtered_copy`. The newly created files will be used in model training.
+
+#### 2. Prognosis via Attention-based LDO Analysis
+Use the `experiment-ldo-abmilite-training.py` script to train ABMILite model, save its weights along with creating figures for manuscript.

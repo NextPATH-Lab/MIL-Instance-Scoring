@@ -223,7 +223,7 @@ class CAMELYON16UNI2Embeddings(Dataset):
         labels = data['labels'].unsqueeze(1)
         embeddings = data['features']
         label = (
-            labels if self.self.labels_by_instance
+            labels if self.labels_by_instance
             else th.max(labels, dim = 0, keepdim = False).values
         )
 
