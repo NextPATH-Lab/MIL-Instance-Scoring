@@ -8,7 +8,6 @@ raw pre-softmax per-instance attention scores, and renders one rectangle
 per patch on top of the WSI, colored by attention value.
 """
 import argparse
-import sys
 from pathlib import Path
 
 import numpy as np
@@ -18,10 +17,6 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib import cm
 from matplotlib.colors import Normalize
-
-# PyGaulix-Suite houses the napari WSI-loading helpers (multiscale pyramid
-# via tiffslide + dask) used across the rest of the annotation tooling.
-sys.path.insert(0, str(Path(r"D:\Projects\PyGaulix-Suite")))
 
 from src.model import ABMILite
 from src.napari_utils import load_big_wsi_v2, get_topmost_visible_image

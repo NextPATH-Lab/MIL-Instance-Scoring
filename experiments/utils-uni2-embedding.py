@@ -7,13 +7,16 @@ Written with help of Claude.
 
 import os
 import time
+import logging
 import argparse
 from pathlib import Path
+from datetime import datetime
 
 import zarr
 import numpy as np
 from tqdm import tqdm
 from dotenv import load_dotenv
+load_dotenv(override = True)
 
 import timm
 import torch
@@ -21,6 +24,12 @@ from torch.amp import autocast
 import torch.distributed as dist
 
 from torchvision import transforms
+
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "camelyon16"
+LOG_DIR.mkdir(exist_ok = True, parents = True)
+
+log = logging.getLogger(__name__)
+_now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
 
 def get_transforms():
     # UNI requires standard ImageNet preprocessing and 224x224 input
@@ -115,9 +124,17 @@ def main():
         global_rank = 0
         world_size = 1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+
+    # Each rank gets its own log file to avoid clobbering under DDP.
+    logging.basicConfig(
+        level = logging.INFO,
+        filename = LOG_DIR / f"{_now} {Path(__file__).stem}_rank{global_rank}.log",
+        format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+        datefmt = "%Y-%m-%d %H:%M:%S"
+    )
+
     if global_rank == 0:
-        print(f"Instantiating UNI2-h model architecture (offline mode)...")
+        log.info("Instantiating UNI2-h model architecture (offline mode)...")
         
     # UNI2-h requires specific architectural parameters
     timm_kwargs = {
@@ -139,7 +156,7 @@ def main():
     model = timm.create_model("vit_giant_patch14_224", pretrained=False, **timm_kwargs)
     
     if global_rank == 0:
-        print(f"Loading cached weights locally...")
+        log.info("Loading cached weights locally...")
         
     from huggingface_hub import hf_hub_download
     
@@ -169,7 +186,7 @@ def main():
     my_zarrs = zarr_list[global_rank::world_size]
     
     if global_rank == 0:
-        print(f"Found {len(zarr_list)} slides. Extracting features into {args.save_dir}")
+        log.info("Found %d slides. Extracting features into %s", len(zarr_list), args.save_dir)
         
     start_time = time.time()
     for idx, z_path in enumerate(my_zarrs):
@@ -186,14 +203,14 @@ def main():
                 "coords": coords
             }, out_path)
             
-        print(f"[Rank {global_rank}] Processed {idx+1}/{len(my_zarrs)} slides: {z_path.name}")
-            
+        log.info("[Rank %d] Processed %d/%d slides: %s", global_rank, idx + 1, len(my_zarrs), z_path.name)
+
     if is_ddp:
         dist.barrier()
-        
+
     if global_rank == 0:
         elapsed = time.time() - start_time
-        print(f"Extraction complete! Took {elapsed/60:.1f} minutes.")
+        log.info("Extraction complete! Took %.1f minutes.", elapsed / 60)
         
     if is_ddp:
         dist.destroy_process_group()

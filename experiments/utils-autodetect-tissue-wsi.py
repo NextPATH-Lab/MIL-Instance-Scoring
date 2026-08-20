@@ -1,9 +1,12 @@
 """Script to autodetect tissue on WSIs and save ROI coordinates.
 """
 
-import time
-import logging
+import os, time, logging
 from pathlib import Path
+from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv(override = True)
 
 from tqdm import tqdm
 
@@ -11,6 +14,18 @@ import numpy as np
 from src.napari_utils import (
     auto_section_polygon,
     save_polygon_coords_as_sections
+)
+
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "camelyon16"
+LOG_DIR.mkdir(exist_ok = True, parents = True)
+
+log = logging.getLogger(__name__)
+now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
+logging.basicConfig(
+    level = logging.INFO,
+    filename = LOG_DIR / f"{now} {Path(__file__).stem}.log",
+    format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+    datefmt = "%Y-%m-%d %H:%M:%S"
 )
 
 def save_auto_annotation(wsi_path: Path, level: int = 4) -> None:
@@ -44,15 +59,15 @@ def annotate_wsi_dataset(
     """The main function. Run annotation/auto-detection on batch of WSI.
     """
     to_process = list(directory.glob(file_ext))
+    log.info("Found %d files to process in %s", len(to_process), directory)
 
     for f in tqdm(to_process):
         start = time.time()
         save_auto_annotation(f, level = level)
         end = time.time()
-        print("File %s took %.5f minutes." % (f.stem, (end - start) / 60))
+        log.info("%s took %.3f minutes.", f.name, (end - start) / 60)
 
 if __name__ == "__main__":
-    logging.getLogger()
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("-d", "--directory", type = Path, help = "Folder of files to process.")

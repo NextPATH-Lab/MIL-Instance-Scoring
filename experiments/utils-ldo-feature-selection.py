@@ -50,12 +50,12 @@ from src.preprocessing import filter_correlated_features_by_mi_score
 ### === Configure Script Environment === ###
 load_dotenv(override = True)
 
-LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR"))
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "LDO-Prostate"
 LOG_DIR.mkdir(exist_ok = True, parents = True)
 CONFIG_DIR = Path(os.getenv("CONFIG_DIR"))
 CONFIG_DIR.mkdir(exist_ok = True, parents = True)
-OUTPUT_DIR = Path(os.getenv("OUTPUTS_DIR")) / "feature-filtration"
-OUTPUT_DIR.mkdir(exist_ok = True, parents = True)
+OUTPUT_DIR = Path(os.getenv("OUTPUTS_DIR")) / "LDO-Prostate"
+(OUTPUT_DIR / "figures").mkdir(exist_ok = True, parents = True)
 
 PATIENT_ID_COL = os.getenv("PATIENT_ID_COL")
 TRAINING_DATA_DIR = Path(os.getenv("TRAINING_DATA_DIR"))
@@ -118,7 +118,7 @@ with open(CONFIG_DIR / "feature-config.json", "w") as f:
 # >> feature with a higher mutual info score in a correlated feature pair.
 
 clinical_df = (
-    pl.read_csv(TRAINING_DATA_DIR.parent / "clinical_deidentified.csv")
+    pl.read_csv(TRAINING_DATA_DIR.parent / "clinical_deidentified_filtered.csv")
         .filter(
             (pl.col("Visit_No") == 1)
         )

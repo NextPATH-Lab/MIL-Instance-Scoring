@@ -51,7 +51,12 @@ Arrays:
         Shards: (shard_size, 4)
 
 """
+import os, logging
 from pathlib import Path
+from datetime import datetime
+
+from dotenv import load_dotenv
+load_dotenv(override = True)
 
 import numpy as np
 import zarr
@@ -61,6 +66,18 @@ from concurrent.futures import ThreadPoolExecutor
 from shapely.geometry import Polygon, MultiPolygon, box
 
 from src._parser import Parser, BaseReader
+
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "camelyon16"
+LOG_DIR.mkdir(exist_ok = True, parents = True)
+
+log = logging.getLogger(__name__)
+now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
+logging.basicConfig(
+    level = logging.INFO,
+    filename = LOG_DIR / f"{now} {Path(__file__).stem}.log",
+    format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+    datefmt = "%Y-%m-%d %H:%M:%S"
+)
 
 def extract_patches(
         wsi_path: Path,
@@ -95,7 +112,7 @@ def extract_patches(
     n_patches = n_tumor + n_benign
     n_max = max(n_tumor, n_benign)
     if n_patches == 0:
-        print(f"No patches found for {wsi_path.stem}. Skipping.")
+        log.warning("No patches found for %s. Skipping.", wsi_path.stem)
         return
 
     # Setup Zarr V3
@@ -208,16 +225,17 @@ if __name__ == "__main__":
         end_idx = min(args.indices[1], len(file_list))
         indices = list(range(start_idx, end_idx))
     
-    print(
-        f"Got arguments: {len(file_list)=} {indices=} "
-        f"tile_size={args.size} overlap={args.overlap_size}")
+    log.info(
+        "Got arguments: %d files, indices=%s, tile_size=%d, overlap=%d",
+        len(file_list), indices, args.size, args.overlap_size
+    )
 
     for idx in indices:
         start = time.time()
         extract_patches(file_list[idx], args.size, args.overlap_size)
         end = time.time()
         dur = (end - start) / 60
-        print(f"{file_list[idx]} took {dur :.3f} minutes.")
+        log.info("%s took %.3f minutes.", file_list[idx], dur)
 
         # Delete file to save space?
         # file_list[idx].unlink()

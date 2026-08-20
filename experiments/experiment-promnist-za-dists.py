@@ -3,8 +3,9 @@ Get the distribution of instance logit x attention from
 all datasets generated in `experiment-promnist-bags.py`
 """
 
-import re
+import re, logging, os
 from pathlib import Path
+from datetime import datetime
 
 import polars as pl
 from tqdm import tqdm
@@ -17,7 +18,21 @@ from torch import optim
 from src.model import ABMIL
 from src.model_trainer import MILTrainer
 
-DEVICE = "cuda"
+DEVICE = os.getenv("ACCELERATION_DEVICE")
+# ==== Logging Set Up ==== #
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "ProMNIST"
+LOG_DIR.mkdir(exist_ok = True, parents = True)
+OUTPUT_DIR = Path(os.getenv("OUTPUTS_DIR")) / "ProMNIST"
+OUTPUT_DIR.mkdir(exist_ok = True, parents = True)
+
+log = logging.getLogger(__name__)
+now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
+logging.basicConfig(
+    level = logging.INFO,
+    filename = LOG_DIR / f"{now} {Path(__file__).stem}.log", 
+    format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+    datefmt = "%Y-%m-%d %H:%M:%S"
+)
 
 def get_za_of_ds(
         model: ABMIL,
@@ -94,4 +109,4 @@ for f in tqdm(files_to_plot_za, total = len(files_to_plot_za)):
     za_dist['t'] = za_dist.get('t', []) + _taus
 
 za_dist = pl.DataFrame(za_dist)
-za_dist.write_csv("./outputs/promnist_za_dist.csv")
+za_dist.write_csv(OUTPUT_DIR / "promnist_za_dist.csv")

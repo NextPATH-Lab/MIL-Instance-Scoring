@@ -4,7 +4,6 @@
 """
 # ==== HYPERPARAMETERS OF EXPERIMENTATION ==== #
 # ======== EDIT VARIABLES HERE ======== #
-DEVICE = "cuda"
 BAG_SIZE = 20
 SEEDS_TO_TEST = [2380, 1780, 0, 100, 260115]
 TAUS_TO_TEST = list(map(lambda x: x / 100, range(0, 105, 5)))
@@ -12,25 +11,15 @@ DATA_SAVE_DIR = Path("./data/ProportionMNISTBags")
 DATA_SAVE_DIR.mkdir(exist_ok = True, parents = True)
 # ======== END VARIABLE EDITS ========= #
 
-# ======== Type ALIAS Defs ======== # 
-type za_vec = np.ndarray[Tuple[int, int], np.dtype[np.float32]]
-type vector_f32 = np.ndarray[Tuple[int,], np.dtype[np.float32]]
-# ======== End Type ALIAS ======== #
-
-import re
-import time
-import json
-import random
-import logging
-import warnings
+# Short-hand to import Native Python Deps
+import re, os, json, time, random, logging, warnings
 from tqdm import tqdm
-from typing import Tuple
 from pathlib import Path
+from datetime import datetime
 from itertools import product
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
-from sklearn.mixture import BayesianGaussianMixture as BGM
-from sklearn import metrics as skm
-from scipy import stats
 import polars as pl
 import numpy as np
 
@@ -42,100 +31,24 @@ import torch as th
 from src.model import ABMIL
 from src.model_trainer import MILTrainer
 from src.datasets import ProportionMnistBags
+from src.utils import get_za_vectors_roc_correlation
 
-# ==== Setting Up Logging ==== #
-Path("./outputs/logs").mkdir(exist_ok = True, parents = True)
-logging.basicConfig(
-    filename = "./outputs/logs/script-promnist.log",
-    level = logging.INFO
-)
-log = logging.getLogger(__name__)
 warnings.filterwarnings('ignore')
-# ==== End Logging Set Up ==== #
+# ==== Logging Set Up ==== #
+LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "ProMNIST"
+LOG_DIR.mkdir(exist_ok = True, parents = True)
+OUTPUT_DIR = Path(os.getenv("OUTPUTS_DIR")) / "ProMNIST"
+OUTPUT_DIR.mkdir(exist_ok = True, parents = True)
 
-# ================================ #
-# ===== Function Definitions ===== #
-# ================================ #
-def cluster_get_pos_class(xy_data: za_vec) -> vector_f32:
-    """
-    Fit a variational Bayesian Gaussian Mixture model, and get the 'positive'
-    instance class (max instance logit component)
-
-    Args:
-        xy_data (np.ndarray): The logit-attention vector for each instance.
-
-    Returns:
-        Array of cluster labels for each instance.
-    """
-    log.info("Starting clustering now.")
-    start = time.time()
-    if xy_data.shape[0] > 100_000:
-        # Limit number of training samples
-        mask = np.random.choice(xy_data.shape[0], 100_000, replace=False)
-        _xy_data = xy_data[mask]
-    else:
-        _xy_data = xy_data
-
-    # Initialize Bayesian Gaussian Mixture
-    bgm = (
-        BGM(
-            n_components = 3,
-            n_init = 3,
-            warm_start = True,
-            random_state = 2380
-        )
-    )
-    bgm.fit(_xy_data)
-
-    # Identify cluster ID with highest logit component
-    cluster_id = np.argmax(bgm.means_[:,0])
-    cluster_scores = bgm.predict_proba(xy_data)[:,cluster_id]
-
-    end = time.time()
-
-    log.info("Clustering done in %.4f seconds.", end - start)
-
-    return cluster_scores
-
-def get_za_vectors_roc_correlation(
-        model: ABMIL,
-        data_loader: DataLoader
-) -> dict[str,float]:
-    """
-    """
-    data_loader.dataset.mode = "instance"
-    za_mx = []
-    instance_labels = []
-    for x, y in data_loader:
-        x = x.to(DEVICE)
-        with th.no_grad():
-            za = model.za_transform(x)
-        instance_labels.append(y.squeeze())
-        za_mx.append(za)
-    za_mx = th.cat(za_mx, dim = 0).cpu()
-
-    instance_labels = th.cat(instance_labels, dim = 0).squeeze()
-    instance_labels = (instance_labels == 9).float()
-
-    cluster_scores = cluster_get_pos_class(za_mx.numpy())
-
-    cluster_roc = skm.roc_auc_score(instance_labels, cluster_scores)
-    attn_roc = skm.roc_auc_score(instance_labels, za_mx[:,1])
-    logit_roc = skm.roc_auc_score(instance_labels, za_mx[:,0])
-    pearson = stats.pearsonr(za_mx[:,0], za_mx[:,1])
-    spearman = stats.spearmanr(za_mx[:,0], za_mx[:,1])
-
-    results = {
-        'attn_roc' : float(attn_roc),
-        'logit_roc' : float(logit_roc),
-        'cluster_roc' : float(cluster_roc),
-        'pearson_stat' : float(pearson.statistic),
-        'pearson_pval' : float(pearson.pvalue),
-        'spearman_stat' : float(spearman.statistic),
-        'spearman_pval' : float(spearman.pvalue)
-    }
-
-    return results
+log = logging.getLogger(__name__)
+now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
+logging.basicConfig(
+    level = logging.INFO,
+    filename = LOG_DIR / f"{now} {Path(__file__).stem}.log", 
+    format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+    datefmt = "%Y-%m-%d %H:%M:%S"
+)
+DEVICE = os.getenv("ACCELERATION_DEVICE")
 
 # ============================ #
 # ===== Dataset Creation ===== #
@@ -201,7 +114,12 @@ for (t, s) in tqdm(taus_with_seeds, total = len(taus_with_seeds)):
 
     train_ds = th.load(t, weights_only = False)
     train_loader = DataLoader(train_ds, batch_size = 1)
-    test_ds = th.load(t.parent / t.name.replace("train", "test"), weights_only = False)
+    test_ds = (
+        th.load(
+            t.parent / t.name.replace("train", "test"),
+            weights_only = False
+        )
+    )
     test_loader = DataLoader(test_ds, batch_size = 1)
 
     abmil = (
@@ -254,4 +172,4 @@ for (t, s) in tqdm(taus_with_seeds, total = len(taus_with_seeds)):
     log.info(f"Iteration took {(end - start) / 60 :.4f} minutes")
 
 dataset_level_metrics = pl.DataFrame(dataset_level_metrics)
-dataset_level_metrics.write_csv("./outputs/promnist.csv")
+dataset_level_metrics.write_csv(OUTPUT_DIR / "promnist.csv")
