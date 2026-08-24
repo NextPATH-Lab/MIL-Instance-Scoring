@@ -369,7 +369,7 @@ class Parser:
                 continue
 
             xy_array = np.array(
-                [[item[2], item[1]] for item in coords_list],
+                [[item[1], item[2]] for item in coords_list],
                 dtype = np.float32)
 
             all_annotations.append(xy_array)

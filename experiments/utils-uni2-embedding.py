@@ -45,6 +45,7 @@ def get_transforms():
 
 def extract_features(model, zarr_path, transform, device, batch_size=256):
     root = zarr.open(str(zarr_path), mode="r")
+    zarr_name = Path(zarr_path).stem
 
     features = []
     labels = []
@@ -56,7 +57,7 @@ def extract_features(model, zarr_path, transform, device, batch_size=256):
         coord_arr = root["benign_coords"]
         n_patches = arr.shape[0]
 
-        msg = "Benign Tile Inference"
+        msg = f"[{zarr_name}] Benign Tile Inference"
         total = n_patches // batch_size + 1
         for i in tqdm(range(0, n_patches, batch_size), msg, total = total):
             chunk_np = arr[i : i + batch_size] # (B, 256, 256, 3) uint8
@@ -77,7 +78,7 @@ def extract_features(model, zarr_path, transform, device, batch_size=256):
         coord_arr = root["tumor_coords"]
         n_patches = arr.shape[0]
 
-        msg = "Tumor Tile Inference"
+        msg = f"[{zarr_name}] Tumor Tile Inference"
         total = n_patches // batch_size + 1
         for i in tqdm(range(0, n_patches, batch_size), msg, total = total):
             chunk_np = arr[i : i + batch_size]

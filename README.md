@@ -41,6 +41,8 @@ $ python experiments/utils-zarrify-wsi.py -d "D:\Data\CAMELYON16\images"
 3. `utils-download-uni2-h.py` - download UNI2-H model from huggingface (requires huggingface token). **Note:** [`MahmoodLab/UNI2-h`](https://huggingface.co/MahmoodLab/UNI2-h) is a *gated* model on HuggingFace — you must request access on its model page and be approved before this script's token will work. Access requests are typically approved quickly, but budget time for this before running the embedding step.
 4. `utils-uni2-embedding.py` - converts image patches contained in `.zarr` directories as bags of embedding vectors.
 
+<span style='color: red;font-weight:bold'>WARNING:</span> Fully processing the WSIs end-to-end may require 6TB of storage. Use the `utils-embed-wsi.py` script instead to bypass `.zarr` saving. (Saving embedding (`.pt`) requires 100-200GB vs .zarrs which take up ~5.1TB of storage)
+
 #### 3. Prostate Cancer LDO Dataset
 [![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.21983424-blue)](https://doi.org/10.5281/zenodo.21983424)  
 LDO features are computed from segmented nuclei of Feulgen-thionin stained prostate core needle biopsies.

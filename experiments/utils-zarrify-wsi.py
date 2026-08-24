@@ -58,6 +58,8 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv(override = True)
 
+from tqdm import tqdm
+
 import numpy as np
 import zarr
 from zarr.codecs import BloscCodec  # Explicit Zarr V3 Codecs
@@ -85,6 +87,11 @@ def extract_patches(
         overlap: int,
         shard_size: int = 225
 ) -> None:
+    zarr_dir_path = wsi_path.parent / f"{wsi_path.stem}.zarr"
+    if zarr_dir_path.exists():
+        log.info("%s already exists. Skipping.", zarr_dir_path)
+        return
+
     parser = Parser()
     reader = BaseReader()
     annotation_files = wsi_path.parent.rglob(f"*{wsi_path.stem}*.sec")
@@ -116,7 +123,6 @@ def extract_patches(
         return
 
     # Setup Zarr V3
-    zarr_dir_path = wsi_path.parent / f"{wsi_path.stem}.zarr"
     root_grp = (
         zarr.create_group(
             store=str(zarr_dir_path), zarr_format=3, overwrite=True))
@@ -174,7 +180,7 @@ def extract_patches(
             for label, rois, z_arr in zarr_iterable:
                 if not rois: continue
                 
-                for i in range(0, len(rois), shard_size):
+                for i in tqdm(range(0, len(rois), shard_size), f"[{wsi_path.stem}]"):
                     batch = rois[i : i + shard_size]
                     # Map the read_patch function
                     images = list(executor.map(read_patch, batch))
@@ -182,7 +188,7 @@ def extract_patches(
                     # Stack and write
                     z_arr[i : i + len(images)] = np.stack(images)
                     cursor += len(images)
-                    print(f"[{wsi_path.stem}] {cursor} / {n_max}", end = "\r")
+                    # print(f"[{wsi_path.stem}] {cursor} / {n_max}", end = "\r")
                     
     # Update attributes
     root_grp.attrs.update({
