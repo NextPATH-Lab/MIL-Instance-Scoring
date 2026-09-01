@@ -198,6 +198,14 @@ class MILTrainer:
                 )
             )
 
+        # Validation bags run full-size (uncapped), so the largest bag's
+        # activations can push PyTorch's caching allocator to reserve a big
+        # chunk of VRAM. That chunk otherwise lingers, unused, into the next
+        # (smaller, capped) training epoch -- release it back explicitly.
+        del val_output
+        if "cuda" in on_device:
+            th.cuda.empty_cache()
+
         return scores
 
     def _metrics_improved(

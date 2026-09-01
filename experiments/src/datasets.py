@@ -1,7 +1,9 @@
 """Definition of various datasets used in experiments.
 
 """
+import os
 import json
+import logging
 from pathlib import Path
 from typing import Union, Literal, Optional
 
@@ -12,6 +14,8 @@ from sklearn.preprocessing import StandardScaler
 import torch as th
 from torch.utils.data import Dataset
 from torchvision import datasets, transforms
+
+log = logging.getLogger(__name__)
 
 class ProportionMnistBags(Dataset):
     """Class to generate proportion mnist bags dataset."""
@@ -175,7 +179,12 @@ class CAMELYON16UNI2Embeddings(Dataset):
             directory: Union[Path | list[Path]],
             labels_by_instance: bool = False,
             with_caching: bool = False,
-            device: str = "cpu"
+            device: str = "cpu",
+            max_bag_size: Optional[int] = None,
+            min_tumor_fraction: float = 0.01,
+            feature_fraction: Optional[float] = None,
+            feature_subset_path: Optional[Path] = None,
+            feature_subset_seed: Optional[int] = None,
     ) -> None:
         """Load in directory of data as PyTorch dataset.
 
@@ -189,6 +198,41 @@ class CAMELYON16UNI2Embeddings(Dataset):
                 capacity allows.
             device (str): custom arg available on the Dataset level to load
                 .pt files onto specific device.
+            max_bag_size (Optional[int]): If set, subsamples each bag down to
+                at most this many instances (re-sampled fresh on every
+                __getitem__ call, i.e. every epoch). Stratified to preserve
+                the bag's true tumor:benign ratio, except when that would
+                keep fewer than `min_tumor_fraction * max_bag_size` tumor
+                instances -- e.g. a micro-metastasis slide where tumor
+                patches are a tiny fraction of the bag -- in which case every
+                tumor instance is kept instead and the remainder is filled
+                with randomly sampled benign instances. None (default)
+                disables subsampling; leave it None for validation/test bags
+                so metrics stay unbiased.
+            min_tumor_fraction (float): Minimum fraction of `max_bag_size`
+                that should be tumor instances, when any exist, before
+                falling back to keeping every tumor instance. Ignored if
+                `max_bag_size` is None.
+            feature_fraction (Optional[float]): If set (e.g. 0.5), restricts
+                every embedding to a *fixed* random subset of that fraction
+                of its feature dimensions (e.g. 768 of UNI2-H's 1536) -- a
+                deliberately incomplete feature set, chosen once rather than
+                per-sample. The subset is generated on first use and saved to
+                `feature_subset_path` as JSON; any dataset instance pointed
+                at the same path (e.g. train/val/test splits of the same
+                experiment) loads the identical subset instead of each
+                independently randomizing its own -- required for the
+                feature at a given index to mean the same thing across
+                splits. None (default) uses the full feature vector.
+            feature_subset_path (Optional[Path]): Where the chosen indices
+                are saved/loaded. Defaults to
+                `CONFIG_DIR/camelyon16/uni2_feature_subset_frac{fraction}.json`
+                (`CONFIG_DIR` from the environment). Ignored if
+                `feature_fraction` is None.
+            feature_subset_seed (Optional[int]): RNG seed used only the first
+                time the subset is generated (i.e. when `feature_subset_path`
+                doesn't exist yet). Irrelevant on every subsequent load, since
+                the saved indices are reused as-is.
         """
         # If `directory` is NOT a Path object, it is assumed to be a
         # pre-filtered list of files (Path objects)
@@ -200,10 +244,95 @@ class CAMELYON16UNI2Embeddings(Dataset):
         self.use_caching = with_caching
         self.device = device
         self.cache = {}
+        self.max_bag_size = max_bag_size
+        self.min_tumor_fraction = min_tumor_fraction
+
+        self.feature_indices = None
+        if feature_fraction is not None:
+            if feature_subset_path is None:
+                config_dir = Path(os.getenv("CONFIG_DIR", "./experiments/config")) / "camelyon16"
+                feature_subset_path = (
+                    config_dir / f"uni2_feature_subset_frac{feature_fraction}.json")
+            self.feature_indices = (
+                self._load_or_create_feature_subset(
+                    Path(feature_subset_path), feature_fraction, feature_subset_seed)
+                .to(device)
+            )
+
+    def _load_or_create_feature_subset(
+            self,
+            path: Path,
+            fraction: float,
+            seed: Optional[int],
+    ) -> th.Tensor:
+        """Load a previously-saved fixed feature-index subset, or generate
+        and save a new one if `path` doesn't exist yet. See `feature_fraction`
+        in __init__ for why this must be shared (not re-randomized) across
+        dataset splits."""
+        if path.exists():
+            with open(path, "r") as f:
+                indices = json.load(f)
+            log.info("Loaded fixed feature subset (%d indices) from %s", len(indices), path)
+            return th.tensor(indices, dtype = th.long)
+
+        # Peek the first file to learn the embedding dimension without
+        # loading every file up front.
+        sample = th.load(self.files[0], weights_only = True, mmap = True, map_location = "cpu")
+        total_dim = sample["features"].shape[1]
+        n_keep = round(fraction * total_dim)
+
+        rng = np.random.default_rng(seed)
+        indices = sorted(rng.choice(total_dim, size = n_keep, replace = False).tolist())
+
+        path.parent.mkdir(parents = True, exist_ok = True)
+        with open(path, "w") as f:
+            json.dump(indices, f)
+        log.info(
+            "Generated fixed feature subset: %d of %d dims (fraction=%s), saved to %s",
+            n_keep, total_dim, fraction, path
+        )
+
+        return th.tensor(indices, dtype = th.long)
 
     def __len__(self):
         """Return number of bags."""
         return len(self.files)
+
+    def _stratified_sample(self, instance_labels: th.Tensor) -> th.Tensor:
+        """Indices to subsample a bag down to self.max_bag_size instances.
+
+        Preserves the bag's true tumor:benign ratio via proportional
+        stratified sampling, unless that would keep fewer than
+        `min_tumor_fraction * max_bag_size` tumor instances -- in that case
+        every tumor instance is kept and the remainder filled with randomly
+        sampled benign instances, so tumor-sparse (e.g. micro-met) bags don't
+        lose their only positive evidence to rounding.
+        """
+        n_total = instance_labels.shape[0]
+        if n_total <= self.max_bag_size:
+            return th.arange(n_total, device = instance_labels.device)
+
+        dev = instance_labels.device
+        tumor_idx = th.nonzero(instance_labels > 0, as_tuple = True)[0]
+        benign_idx = th.nonzero(instance_labels <= 0, as_tuple = True)[0]
+        n_tumor = tumor_idx.shape[0]
+
+        tumor_fraction = n_tumor / n_total
+        target_tumor = round(tumor_fraction * self.max_bag_size)
+        floor_tumor = self.min_tumor_fraction * self.max_bag_size
+
+        if n_tumor > 0 and target_tumor < floor_tumor:
+            n_tumor_keep = min(n_tumor, self.max_bag_size)
+        else:
+            n_tumor_keep = min(target_tumor, n_tumor)
+
+        n_benign_keep = min(self.max_bag_size - n_tumor_keep, benign_idx.shape[0])
+
+        sampled_tumor = tumor_idx[th.randperm(n_tumor, device = dev)[:n_tumor_keep]]
+        sampled_benign = (
+            benign_idx[th.randperm(benign_idx.shape[0], device = dev)[:n_benign_keep]])
+
+        return th.cat([sampled_tumor, sampled_benign])
 
     def __getitem__(self, idx: int) -> th.Tensor:
         """Get specific slide from files and the UNI2-H embeddings of patches.
@@ -220,8 +349,18 @@ class CAMELYON16UNI2Embeddings(Dataset):
             )
         )
 
-        labels = data['labels'].unsqueeze(1)
+        instance_labels = data['labels']
         embeddings = data['features']
+
+        if self.feature_indices is not None:
+            embeddings = embeddings.index_select(1, self.feature_indices)
+
+        if self.max_bag_size is not None:
+            keep_idx = self._stratified_sample(instance_labels)
+            embeddings = embeddings[keep_idx]
+            instance_labels = instance_labels[keep_idx]
+
+        labels = instance_labels.unsqueeze(1)
         label = (
             labels if self.labels_by_instance
             else th.max(labels, dim = 0, keepdim = False).values

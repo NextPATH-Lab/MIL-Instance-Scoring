@@ -1,6 +1,7 @@
 """Train attention-based MIL on CAMELYON16 UNI2-H Embeddings
 """
 import os
+import argparse
 import logging
 import warnings; warnings.filterwarnings("ignore")
 from pathlib import Path
@@ -45,14 +46,76 @@ logging.basicConfig(
     datefmt = "%Y-%m-%d %H:%M:%S"
 )
 
+cli = argparse.ArgumentParser(description = "Train ABMILite on CAMELYON16 patch embeddings.")
+cli.add_argument(
+    "--embeds-dir", type = Path, default = None,
+    help = (
+        "Directory of per-slide {features, labels, coords} .pt files to "
+        "train on (e.g. embeddings2 for UNI2-H). Defaults to "
+        "CAMELYON16_EMBEDS_DIR from the environment."
+    )
+)
+cli.add_argument(
+    "--embedding-dim", type = int, default = 1536,
+    help = "Per-instance feature dimensionality of the embeddings in --embeds-dir (1536 for UNI2-H)."
+)
+cli.add_argument(
+    "--run-name", type = str, default = None,
+    help = "Tags checkpoint/figure filenames so different embedding sources don't overwrite each other. Defaults to the --embeds-dir folder name."
+)
+cli.add_argument(
+    "--feature-fraction", type = float, default = None,
+    help = (
+        "Approach 2 (deliberately incomplete features): if set (e.g. 0.5), "
+        "restrict every embedding to a *fixed* random subset of this "
+        "fraction of --embedding-dim's feature dims, generated once and "
+        "reused consistently across train/val/test/instance datasets. See "
+        "CAMELYON16UNI2Embeddings.feature_fraction. None (default) uses the "
+        "full embedding."
+    )
+)
+args = cli.parse_args()
+FEATURE_FRACTION = args.feature_fraction
+
+EMBEDS_DIR = args.embeds_dir or Path(os.getenv("CAMELYON16_EMBEDS_DIR"))
+
 # ==== HYPERPARAMTERS FOR SCRIPT ==== #
 SHOW_TEST_PERFORMANCE = True
 ACCELERATION_DEVICE = "cuda"
 SEED = 2380
 EPOCHS = 40
 
-EMBEDDING_DIM = 1536
-HIDDEN_DIM = EMBEDDING_DIM // 4
+# Reflects the *actual* per-instance dimensionality the model will see --
+# must track --embedding-dim and FEATURE_FRACTION, or ABMILite's in_channels
+# will mismatch the embeddings coming out of the dataset.
+EMBEDDING_DIM = (
+    round(args.embedding_dim * FEATURE_FRACTION) if FEATURE_FRACTION is not None
+    else args.embedding_dim)
+HIDDEN_DIM = EMBEDDING_DIM // 4 if EMBEDDING_DIM > 512 else EMBEDDING_DIM
+
+# Tags checkpoint/figure filenames so different embedding sources (or a
+# feature-fraction run vs the full embedding) never overwrite each other.
+RUN_TAG = args.run_name or EMBEDS_DIR.name
+if FEATURE_FRACTION is not None:
+    RUN_TAG += f"_frac{FEATURE_FRACTION}"
+
+# Ties the saved feature-subset indices to the specific embedding source, so
+# a feature-fraction run on a different embedding set (different total dim)
+# never loads a stale, mismatched index file. None when unused, matching
+# CAMELYON16UNI2Embeddings' own default-off behavior.
+FEATURE_SUBSET_PATH = (
+    Path(os.getenv("CONFIG_DIR", "./experiments/config")) / "camelyon16" / f"feature_subset_{RUN_TAG}.json"
+    if FEATURE_FRACTION is not None else None
+)
+
+# Caps instances per training bag so attention/backprop over a huge slide
+# (100k+ patches) doesn't spill dedicated VRAM. None disables subsampling.
+# Stratified to preserve each bag's true tumor:benign ratio, except when that
+# would keep fewer than MIN_TUMOR_FRACTION * MAX_BAG_SIZE tumor instances --
+# e.g. a micro-metastasis slide -- in which case every tumor instance is kept
+# instead. See CAMELYON16UNI2Embeddings._stratified_sample.
+MAX_BAG_SIZE = None # 120_000 # >> Tuned for 16GB VRAM ( Took 13.5 GB Max VRAM )
+MIN_TUMOR_FRACTION = 0.01
 # ==== END HYPERPARAMTERS DEFS ==== #
 
 os.environ["PYTHONHASHSEED"] = str(SEED)
@@ -65,7 +128,8 @@ th.backends.cudnn.benchmark = False
 th.backends.cudnn.deterministic = True
 
 ###
-data_dir = list(Path(os.getenv("CAMELYON16_EMBEDS_DIR")).glob("*.pt"))
+data_dir = list(EMBEDS_DIR.glob("*.pt"))
+print(EMBEDS_DIR)
 
 # Get the training files, test_ins_labels, and the test files
 train_files = (
@@ -113,8 +177,22 @@ for train_idx, val_idx in splitter.split(train_files, train_labels):
     print(f"Training {abmilite.__class__.__name__} with {n_params= :,}.")
     adam = optim.AdamW(abmilite.parameters(), lr = 1e-4)
     # Create dataset
-    train_ds = CAMELYON16UNI2Embeddings(train_files[train_idx], device = "cuda")
-    val_ds = CAMELYON16UNI2Embeddings(train_files[val_idx], device = "cuda")
+    train_ds = (
+        CAMELYON16UNI2Embeddings(
+            train_files[train_idx], device = "cuda",
+            max_bag_size = MAX_BAG_SIZE, min_tumor_fraction = MIN_TUMOR_FRACTION,
+            feature_fraction = FEATURE_FRACTION, feature_subset_seed = SEED, feature_subset_path = FEATURE_SUBSET_PATH,
+        )
+    )
+    # Validation bags are left full-size (no subsampling) so the metric used
+    # for model selection stays unbiased. Feature fraction still applies --
+    # it's a fixed subset shared with train_ds, not per-bag subsampling.
+    val_ds = (
+        CAMELYON16UNI2Embeddings(
+            train_files[val_idx], device = "cuda",
+            feature_fraction = FEATURE_FRACTION, feature_subset_seed = SEED, feature_subset_path = FEATURE_SUBSET_PATH,
+        )
+    )
 
     train_loader = (
         DataLoader(
@@ -154,15 +232,28 @@ for train_idx, val_idx in splitter.split(train_files, train_labels):
     break
 th.save(
     abmilite.cpu().state_dict(),
-    OUTPUTS_DIR / "abmilite_camelyon16_uni2h.pt"
+    OUTPUTS_DIR / f"abmilite_camelyon16_{RUN_TAG}.pt"
 )
 
 ### === Run Trained ABMILite model === ###
 # >> Ensure ABMILite remains on correct device
+abmilite = (
+    ABMILite(
+        **model_init
+    )
+)
+abmilite.load_state_dict(
+    th.load(OUTPUTS_DIR / f"abmilite_camelyon16_{RUN_TAG}.pt")
+)
 abmilite = abmilite.to(ACCELERATION_DEVICE)
 
 # >> Get Test Metrics First
-test_ds = CAMELYON16UNI2Embeddings(test_files, device = ACCELERATION_DEVICE)
+test_ds = (
+    CAMELYON16UNI2Embeddings(
+        test_files, device = ACCELERATION_DEVICE,
+        feature_fraction = FEATURE_FRACTION, feature_subset_seed = SEED, feature_subset_path = FEATURE_SUBSET_PATH,
+    )
+)
 test_dataloader = DataLoader(test_ds, batch_size = 1)
 
 test_metrics = (
@@ -170,7 +261,8 @@ test_metrics = (
         abmilite,
         test_dataloader,
         ["roc_auc", "balanced_accuracy", "average_precision"],
-        [False, True, False]
+        [False, True, False],
+        on_device = ACCELERATION_DEVICE
     )
 )
 
@@ -181,13 +273,15 @@ if SHOW_TEST_PERFORMANCE:
 train_instance_ds = (
     CAMELYON16UNI2Embeddings(
         train_files,
-        labels_by_instance = True
+        labels_by_instance = True,
+        feature_fraction = FEATURE_FRACTION, feature_subset_seed = SEED, feature_subset_path = FEATURE_SUBSET_PATH,
     )
 )
 test_instance_ds = (
     CAMELYON16UNI2Embeddings(
         test_files,
-        labels_by_instance = True
+        labels_by_instance = True,
+        feature_fraction = FEATURE_FRACTION, feature_subset_seed = SEED, feature_subset_path = FEATURE_SUBSET_PATH,
     )
 )
 
@@ -351,12 +445,12 @@ ax_roc.grid(True, linestyle = ":", alpha = 0.6)
 
 ### === Save all plots === ###
 fig_za_scatter.savefig(
-    OUTPUTS_DIR / "figures/camelyon16-uni2-za-plot.png",
+    OUTPUTS_DIR / f"figures/camelyon16-uni2-za-plot_{RUN_TAG}.png",
     dpi = 300,
     bbox_inches = 'tight'
 )
 fig_roc.savefig(
-    OUTPUTS_DIR / "figures/instance_roc.png",
+    OUTPUTS_DIR / f"figures/instance_roc_{RUN_TAG}.png",
     dpi = 300,
     bbox_inches = 'tight'
 )

@@ -375,3 +375,37 @@ class Parser:
             all_annotations.append(xy_array)
 
         return all_annotations
+
+def classify_tile_rois(
+        wsi_path: Path,
+        tile_size: int,
+        overlap: int,
+        parser: "Parser",
+        reader: "BaseReader"
+) -> tuple[list, list]:
+    """Slice a slide's tissue ROI(s) into tiles and split them tumor/benign.
+
+    Shared by utils-zarrify-wsi.py and utils-embed-wsi.py -- classification
+    only, no pixel data is read.
+    """
+    annotation_files = wsi_path.parent.rglob(f"*{wsi_path.stem}*.sec")
+    tumor_annotation_file = (
+        wsi_path.parent.parent / f"annotations/{wsi_path.stem}.xml")
+
+    if (is_tumor := tumor_annotation_file.exists()):
+        tumor_regions = parser.parse_asap_xml(tumor_annotation_file)
+        tumor_regions = sg.MultiPolygon(list(map(sg.Polygon, tumor_regions)))
+
+    tumor_rois = []
+    benign_rois = []
+    for f in annotation_files:
+        roi_coords = parser.parse_getafics_roi(f, False)
+        slices = reader._get_roi_tile_slices(roi_coords, tile_size, overlap)
+        for s in slices:
+            tile = sg.box(*s)
+            if is_tumor and tumor_regions.intersects(tile):
+                tumor_rois.append(s)
+            else:
+                benign_rois.append(s)
+
+    return tumor_rois, benign_rois

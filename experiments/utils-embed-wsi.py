@@ -27,15 +27,14 @@ from tqdm import tqdm
 
 import timm
 import torch
+import torch.nn.functional as F
 from torch.amp import autocast
 import torch.distributed as dist
-from torchvision import transforms
 
 import openslide
 from concurrent.futures import ThreadPoolExecutor
-from shapely.geometry import Polygon, MultiPolygon, box
 
-from src._parser import Parser, BaseReader
+from src._parser import Parser, BaseReader, classify_tile_rois
 
 LOG_DIR = Path(os.getenv("GLOBAL_LOG_DIR")) / "camelyon16"
 LOG_DIR.mkdir(exist_ok = True, parents = True)
@@ -43,57 +42,18 @@ LOG_DIR.mkdir(exist_ok = True, parents = True)
 log = logging.getLogger(__name__)
 _now = datetime.now().strftime("%Y-%m-%d %Hh%Mm")
 
-def get_transforms():
-    # UNI requires standard ImageNet preprocessing and 224x224 input
-    return transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize(224),
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean=(0.485, 0.456, 0.406),
-            std=(0.229, 0.224, 0.225)
-        ),
-    ])
-
-def classify_tile_rois(
-        wsi_path: Path,
-        tile_size: int,
-        overlap: int,
-        parser: Parser,
-        reader: BaseReader
-) -> tuple[list, list]:
-    """Slice a slide's tissue ROI(s) into tiles and split them tumor/benign.
-
-    Same classification logic as extract_patches in utils-zarrify-wsi.py,
-    stopping short of reading any pixel data.
-    """
-    annotation_files = wsi_path.parent.rglob(f"*{wsi_path.stem}*.sec")
-    tumor_annotation_file = (
-        wsi_path.parent.parent / f"annotations/{wsi_path.stem}.xml")
-
-    if (is_tumor := tumor_annotation_file.exists()):
-        tumor_regions = parser.parse_asap_xml(tumor_annotation_file)
-        tumor_regions = MultiPolygon(list(map(Polygon, tumor_regions)))
-
-    tumor_rois = []
-    benign_rois = []
-    for f in annotation_files:
-        roi_coords = parser.parse_getafics_roi(f, False)
-        slices = reader._get_roi_tile_slices(roi_coords, tile_size, overlap)
-        for s in slices:
-            tile = box(*s)
-            if is_tumor and tumor_regions.intersects(tile):
-                tumor_rois.append(s)
-            else:
-                benign_rois.append(s)
-
-    return tumor_rois, benign_rois
+# UNI2 requires standard ImageNet preprocessing and 224x224 input
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
 
 def embed_slide(
         model,
+        embed_fn,
         wsi_path: Path,
-        transform,
         device,
+        mean: torch.Tensor,
+        std: torch.Tensor,
+        target_size: int,
         tile_size: int,
         overlap: int,
         batch_size: int,
@@ -118,7 +78,23 @@ def embed_slide(
                 slide.read_region(
                     (s[0], s[1]), 0, (tile_size, tile_size)).convert("RGB"))
 
-        with ThreadPoolExecutor(max_workers=32) as executor:
+        def read_and_pin(rois_batch, io_executor):
+            # Runs on the prefetch thread: stays entirely off the GPU so it can
+            # overlap with the previous batch's forward pass.
+            images = list(io_executor.map(read_patch, rois_batch))
+            arr = np.stack(images)  # (B, H, W, 3) uint8
+            t = torch.from_numpy(arr).permute(0, 3, 1, 2).contiguous()
+            n = t.shape[0]
+            if n < batch_size:
+                # Zero-pad the final, short batch of each group up to batch_size
+                # so every forward pass sees the same input shape -- avoids
+                # triggering a torch.compile recompile on the last batch.
+                pad = torch.zeros((batch_size - n, *t.shape[1:]), dtype=t.dtype)
+                t = torch.cat([t, pad], dim=0)
+            return t.pin_memory()
+
+        with ThreadPoolExecutor(max_workers=32) as io_executor, \
+             ThreadPoolExecutor(max_workers=1) as prefetch_executor:
             roi_groups = [
                 ("Benign", benign_rois, 0),
                 ("Tumor", tumor_rois, 1),
@@ -126,17 +102,33 @@ def embed_slide(
             for label_name, rois, label_val in roi_groups:
                 if not rois: continue
 
+                batch_slices = [
+                    rois[i : i + batch_size] for i in range(0, len(rois), batch_size)]
                 msg = f"[{wsi_path.stem}] {label_name} Tile Embedding"
-                for i in tqdm(range(0, len(rois), batch_size), msg):
-                    batch = rois[i : i + batch_size]
-                    images = list(executor.map(read_patch, batch))
-                    chunk_t = [transform(im) for im in images]
-                    batch_t = torch.stack(chunk_t).to(device, non_blocking=True)
+
+                next_future = prefetch_executor.submit(read_and_pin, batch_slices[0], io_executor)
+                for bi in tqdm(range(len(batch_slices)), msg):
+                    batch = batch_slices[bi]
+                    pinned_t = next_future.result()
+                    if bi + 1 < len(batch_slices):
+                        next_future = prefetch_executor.submit(
+                            read_and_pin, batch_slices[bi + 1], io_executor)
+
+                    # Batched GPU resize/normalize replaces the old per-image
+                    # PIL transform, which ran single-threaded on CPU while
+                    # the GPU sat idle.
+                    batch_t = pinned_t.to(device, non_blocking=True).float().div_(255.0)
+                    batch_t = F.interpolate(
+                        batch_t, size=target_size, mode="bilinear",
+                        align_corners=False, antialias=True
+                    )
+                    batch_t = (batch_t - mean) / std
 
                     with autocast(device_type="cuda" if "cuda" in str(device) else "cpu", dtype=torch.float16):
                         with torch.no_grad():
-                            feats = model(batch_t)
+                            feats = embed_fn(model, batch_t)
 
+                    feats = feats[:len(batch)]  # drop the zero-padded rows, if any
                     features.append(feats.cpu())
                     labels.extend([label_val] * len(batch))
                     coords.append(np.array(batch, dtype=np.int64))
@@ -146,46 +138,7 @@ def embed_slide(
     all_coords = torch.tensor(np.concatenate(coords, axis=0), dtype=torch.long)
     return all_features, all_labels, all_coords
 
-def main():
-    parser_cli = argparse.ArgumentParser(description="Zarrify + Extract UNI2 Features from WSIs in one pass")
-    parser_cli.add_argument("-d", "--directory", type=Path, required=True, help="Directory of WSI (+ .sec ROI / annotations) to embed")
-    parser_cli.add_argument("-s", "--save-dir", type=Path, required=True, help="Directory to save extracted .pt files")
-    parser_cli.add_argument(
-        "-i", "--indices",
-        nargs="*", default=None, type=int,
-        help="[start, end) range of indices within directory to process.")
-    parser_cli.add_argument("-t", "--tile-size", type=int, default=256, help="Tile size")
-    parser_cli.add_argument("-o", "--overlap-size", type=int, default=32, help="Size of tile overlaps.")
-    parser_cli.add_argument("-b", "--batch-size", type=int, default=256, help="Batch size for UNI extraction")
-    args = parser_cli.parse_args()
-
-    args.save_dir.mkdir(parents=True, exist_ok=True)
-
-    # Ensure HuggingFace Hub does not attempt network requests on air-gapped compute nodes
-    os.environ["HF_HUB_OFFLINE"] = "1"
-
-    # DDP Initialization
-    is_ddp = "RANK" in os.environ
-    if is_ddp:
-        dist.init_process_group(backend="nccl")
-        global_rank = int(os.environ["RANK"])
-        local_rank = int(os.environ["LOCAL_RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-    else:
-        global_rank = 0
-        world_size = 1
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # Each rank gets its own log file to avoid clobbering under DDP.
-    logging.basicConfig(
-        level = logging.INFO,
-        filename = LOG_DIR / f"{_now} {Path(__file__).stem}_rank{global_rank}.log",
-        format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
-        datefmt = "%Y-%m-%d %H:%M:%S"
-    )
-
+def load_uni2h(device, compile_model, global_rank):
     if global_rank == 0:
         log.info("Instantiating UNI2-h model architecture (offline mode)...")
 
@@ -224,11 +177,62 @@ def main():
         state_dict = torch.load(weight_path, map_location="cpu")
 
     model.load_state_dict(state_dict, strict=True)
-
     model.eval()
     model.to(device)
 
-    transform = get_transforms()
+    if compile_model:
+        if global_rank == 0:
+            log.info("Compiling model with torch.compile (first batch will be slow)...")
+        model = torch.compile(model, mode="reduce-overhead")
+
+    embed_fn = lambda m, x: m(x)
+    mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
+    return model, embed_fn, 224, mean, std
+
+def main():
+    parser_cli = argparse.ArgumentParser(description="Zarrify + Extract UNI2 Features from WSIs in one pass")
+    parser_cli.add_argument("-d", "--directory", type=Path, required=True, help="Directory of WSI (+ .sec ROI / annotations) to embed")
+    parser_cli.add_argument("-s", "--save-dir", type=Path, required=True, help="Directory to save extracted .pt files")
+    parser_cli.add_argument(
+        "-i", "--indices",
+        nargs="*", default=None, type=int,
+        help="[start, end) range of indices within directory to process.")
+    parser_cli.add_argument("-t", "--tile-size", type=int, default=256, help="Tile size")
+    parser_cli.add_argument("-o", "--overlap-size", type=int, default=32, help="Size of tile overlaps.")
+    parser_cli.add_argument("-b", "--batch-size", type=int, default=256, help="Batch size for UNI extraction")
+    parser_cli.add_argument("--compile", action="store_true", help="torch.compile the model for faster steady-state throughput (adds a one-time warmup compile cost). On Windows, requires a version-matched triton-windows -- see the 'compile' extra in pyproject.toml.")
+    args = parser_cli.parse_args()
+
+    args.save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure HuggingFace Hub does not attempt network requests on air-gapped compute nodes
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
+    # DDP Initialization
+    is_ddp = "RANK" in os.environ
+    if is_ddp:
+        dist.init_process_group(backend="nccl")
+        global_rank = int(os.environ["RANK"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        device = torch.device(f"cuda:{local_rank}")
+        torch.cuda.set_device(device)
+    else:
+        global_rank = 0
+        world_size = 1
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Each rank gets its own log file to avoid clobbering under DDP.
+    logging.basicConfig(
+        level = logging.INFO,
+        filename = LOG_DIR / f"{_now} {Path(__file__).stem}_rank{global_rank}.log",
+        format = "%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s",
+        datefmt = "%Y-%m-%d %H:%M:%S"
+    )
+
+    model, embed_fn, target_size, mean, std = load_uni2h(device, args.compile, global_rank)
+
     parser = Parser()
     reader = BaseReader()
 
@@ -263,7 +267,7 @@ def main():
 
         slide_start = time.time()
         feats, labels, coords = embed_slide(
-            model, wsi_path, transform, device,
+            model, embed_fn, wsi_path, device, mean, std, target_size,
             args.tile_size, args.overlap_size, args.batch_size,
             parser, reader
         )

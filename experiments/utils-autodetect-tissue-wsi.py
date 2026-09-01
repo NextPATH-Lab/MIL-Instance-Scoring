@@ -36,11 +36,11 @@ def save_auto_annotation(wsi_path: Path, level: int = 4) -> None:
         auto_section_polygon(
             wsi_path,
             level = level,
-            forgivingness = 0.8,
-            polygon_buffer = 100,
-            min_area_threshold = 1_500,
+            forgivingness = 0.5,
+            polygon_buffer = 0,
+            min_area_threshold = 1_000,
             merge_intersecting = True,
-            with_convex_hull = True,
+            with_convex_hull = False,
             as_arrays = True,
             rescale = True))
 

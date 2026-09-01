@@ -7,12 +7,12 @@ name = "MIL-Instance-Scoring"
 version = "0.0.0"
 description = "Analysis code for Instance Attention is Misleading: Bag Composition Affects Interpretability in Digital Pathology Multiple Instance Learning"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 
 dependencies = [
     "python-dotenv",
     "tiffslide>=3.0.0",
-    "tifffile==2026.4.11",
+    "tifffile==2025.5.21",
     "numpy==2.4.4",
     "zarr==3.1.6",
     "pyvips[binary]",
@@ -23,7 +23,7 @@ dependencies = [
     "pandas==3.0.3",
     "scikit-learn==1.9.0",
     "scikit-image==0.26.0",
-    "scipy==1.18.0",
+    "scipy==1.17.0",
     "statsmodels==0.14.6",
     "monai==1.5.2",
     "opencv-python-headless==4.13.0.92",
@@ -39,11 +39,19 @@ dependencies = [
     "dask[array]==2026.7.0",
     "huggingface-hub==1.25.1",
     "tqdm==4.68.4",
-    "pyyaml==6.0.3"
+    "pyyaml==6.0.3",
+    "pyqt6==6.11.0"
 ]
 
 [project.optional-dependencies]
 monaiext = ["monai[all]"]
+# For utils-embed-wsi.py's --compile flag. Only needed on Windows -- Linux
+# torch wheels already pull in a matching triton. Pinned because newer
+# triton-windows releases (e.g. 3.7.x) have broken torch==2.7.1's inductor
+# backend with an internal API mismatch (ImportError: cannot import name
+# 'triton_key' from 'triton.compiler.compiler'); 3.3.1 matches what this
+# torch version was built against.
+compile = ["triton-windows==3.3.1.post21; sys_platform == 'win32'"]
 
 # ==============================================================================
 # --- UV CROSS-PLATFORM INDEX CONFIG ---
