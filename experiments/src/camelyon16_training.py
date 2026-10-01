@@ -56,6 +56,8 @@ def run_one_trial(
         device: str = "cuda",
         za_plot_path: Optional[Path] = None,
         checkpoint_path: Optional[Path] = None,
+        attention_branches: int = 3,
+        hidden_dim: int = 384,
 ) -> dict:
     """Train ABMILite once (single StratifiedKFold fold, seeded by `seed`)
     and evaluate it, returning a flat dict of bag- and instance-level
@@ -82,10 +84,10 @@ def run_one_trial(
     # anchor point is unchanged.
     model_init = {
         "in_channels": embedding_dim,
-        "hidden_size": 384,
+        "hidden_size": hidden_dim,
         "use_feature_extractor": False,
         "attention_mode": "simple",
-        "attention_branches": 3,
+        "attention_branches": attention_branches,
     }
 
     train_labels = np.array([int(x.stem.startswith("tumor")) for x in train_files])
@@ -153,9 +155,16 @@ def run_one_trial(
         fpr, tpr, _ = skm.roc_curve(test_ins_labels, scores)
         return float(skm.auc(fpr, tpr))
 
+    def _ap(scores):
+        return float(skm.average_precision_score(test_ins_labels, scores))
+
     attn_roc_auc = _auc(test_za_space[:, 1])
     logit_roc_auc = _auc(test_za_space[:, 0])
     cluster_roc_auc = _auc(cluster_scores)
+
+    attn_average_precision = _ap(test_za_space[:, 1])
+    logit_average_precision = _ap(test_za_space[:, 0])
+    cluster_average_precision = _ap(cluster_scores)
 
     pearson_r, _ = pearsonr(test_za_space[:, 0], test_za_space[:, 1])
     spearman_r, _ = spearmanr(test_za_space[:, 0], test_za_space[:, 1])
@@ -190,6 +199,9 @@ def run_one_trial(
         "attn_roc_auc": attn_roc_auc,
         "logit_roc_auc": logit_roc_auc,
         "cluster_roc_auc": cluster_roc_auc,
+        "attn_average_precision": attn_average_precision,
+        "logit_average_precision": logit_average_precision,
+        "cluster_average_precision": cluster_average_precision,
         "pearson_r": float(pearson_r),
         "spearman_r": float(spearman_r),
     }

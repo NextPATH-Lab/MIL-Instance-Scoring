@@ -64,6 +64,12 @@ CSV_FIELDS = [
     "bag_roc_auc", "bag_balanced_accuracy", "bag_average_precision",
     "attn_roc_auc", "logit_roc_auc", "cluster_roc_auc",
     "pearson_r", "spearman_r",
+    # Appended after pearson_r/spearman_r, not grouped with the other attn/logit/cluster
+    # metrics above, to match column order utils-sweep-checkpoint-metrics.py produces when
+    # it backfills a new metric onto an existing CSV via pandas (which appends new columns
+    # at the end) -- csv.DictWriter here and pandas there must agree on column order, since
+    # DictWriter's append mode trusts fieldnames without re-reading the file's actual header.
+    "attn_average_precision", "logit_average_precision", "cluster_average_precision",
 ]
 
 def load_completed(csv_path: Path) -> set[tuple[float, int, int, int, float]]:

@@ -49,7 +49,7 @@ def main():
     n_reps = df.groupby("fraction").size()
     print("Replicates per fraction:\n", n_reps)
 
-    # 1. Instance classification performance
+    # 1. Instance classification performance (ROC AUC)
     fig, ax = plt.subplots(figsize = (6, 5))
     _plot_metrics(
         ax, df,
@@ -59,6 +59,27 @@ def main():
     ax.set_title("Instance Classification Performance")
     fig.savefig(args.out_dir / "feature_fraction_instance_roc_auc.png", dpi = 300, bbox_inches = "tight")
     plt.close(fig)
+
+    # 1b. Instance classification performance (Average Precision) -- more
+    # sensitive than ROC AUC to the instance-level class imbalance here
+    # (tumor patches are a small minority), so the gap between methods/
+    # fractions is expected to show up wider here than in the ROC AUC panel
+    # above. Only plotted if the AP columns exist (from
+    # utils-sweep-checkpoint-metrics.py --metric average_precision).
+    ap_cols = ["attn_average_precision", "logit_average_precision", "cluster_average_precision"]
+    if all(c in df.columns for c in ap_cols):
+        fig, ax = plt.subplots(figsize = (6, 5))
+        _plot_metrics(
+            ax, df,
+            list(zip(ap_cols, ["Attention", "Logit", "Clustering"])),
+            ylabel = "Average Precision", ylim = (0.0, 1.0),
+        )
+        ax.set_title("Instance Classification Performance")
+        fig.savefig(args.out_dir / "feature_fraction_instance_average_precision.png", dpi = 300, bbox_inches = "tight")
+        plt.close(fig)
+    else:
+        print("Skipping average-precision instance plot -- run utils-sweep-checkpoint-metrics.py "
+              "--metric average_precision first to add attn/logit/cluster_average_precision columns.")
 
     # 2. Instance logit-attention correlation
     fig, ax = plt.subplots(figsize = (6, 5))

@@ -37,8 +37,15 @@ def load_section_annotations(
 
     parser = Parser()
 
-    # ASPERANZA BRANCH
-    with open(Path(__file__).parent / "config.json") as f:
+    # ASPERANZA BRANCH -- draw-schema color config for Getafics-style
+    # tissue-section ROI layers. Optional: this file isn't checked into the
+    # repo, so its absence shouldn't block loading the WSI or (unrelated)
+    # tumor annotation via load_tumor_annotation_xml.
+    config_path = Path(__file__).parent / "config.json"
+    if not config_path.exists():
+        logger.warning(f"{config_path} not found -- skipping Getafics tissue-section ROI layers.")
+        return
+    with open(config_path) as f:
         color_config = json.load(f)['draw-schema']
 
     for _layername, _enum in color_config["labels"].items():
@@ -67,10 +74,54 @@ def load_section_annotations(
         except:
             logger.warning(f"Layer: {roi_layer} not found.")
 
+def load_tumor_annotation_xml(
+        viewer: "napari.Viewer",
+        annotation_xml: Path,
+        layer_name: str = "tumor annotation",
+        edge_color: str = "red",
+        fill: bool = False,
+        opacity: float = None,
+) -> None:
+    """Draw a CAMELYON16-style ASAP XML tumor annotation (a single .xml file,
+    not a directory of Getafics .roi files -- that's what
+    load_section_annotations is for) as a napari shapes layer.
+
+    Distinct from load_section_annotations because the two annotation
+    formats are unrelated: parse_asap_xml returns a flat list of (x, y)
+    polygon vertex arrays straight from the XML's <Coordinate> elements, with
+    no Getafics-style SEC/ROI nesting or draw-schema color config to key off.
+
+    fill=False (default) draws outline-only, matching the existing
+    tissue-section ROI layers above. fill=True fills the polygon interior
+    with edge_color; opacity defaults to 0.3 when filled (so the tissue
+    underneath stays visible) vs. 1.0 outline-only, but can be overridden
+    either way since napari applies one opacity to both face and edge.
+    """
+    parser = Parser()
+    polygons = parser.parse_asap_xml(annotation_xml)
+
+    if opacity is None:
+        opacity = 0.3 if fill else 1.0
+
+    if not (layer_name in viewer.layers):
+        viewer.add_shapes(
+            name = layer_name,
+            face_color = edge_color if fill else [0, 0, 0, 0],
+            edge_color = edge_color,
+            edge_width = 80,
+            opacity = opacity,
+        )
+
+    for polygon in polygons:
+        viewer.layers[layer_name].add(
+            np.fliplr(np.asarray(polygon)),
+            shape_type = "polygon")
+
 def load_big_wsi_v2(
     viewer: "napari.Viewer",
     path: Path,
-    with_annotations: bool = False
+    with_annotations: bool = False,
+    tumor_annotation_fill: bool = False,
 ) -> None:
     path_str = str(path)
     name = Path(path).stem
@@ -152,9 +203,12 @@ def load_big_wsi_v2(
         # Ensures the function exists before calling
         if 'load_section_annotations' in globals():
             if anno_path.exists() or anno_path.with_suffix('.xml').exists():
-                load_section_annotations(viewer, anno_path)
-            if anno_path2.exists():
-                load_section_annotations(viewer, anno_path2)
+                load_section_annotations(viewer, anno_path, anno_path.stem)
+        # anno_path2 is a single ASAP XML file (CAMELYON16 tumor annotation),
+        # not a directory of Getafics .roi files -- needs the XML-specific
+        # loader above, not load_section_annotations.
+        if anno_path2.exists():
+            load_tumor_annotation_xml(viewer, anno_path2, fill = tumor_annotation_fill)
 
     return
 

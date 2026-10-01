@@ -18,14 +18,19 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib import cm
 from matplotlib.colors import Normalize
 
+import json
+
 from src.model import ABMILite
 from src.napari_utils import load_big_wsi_v2, get_topmost_visible_image
 
-# Must match the architecture the checkpoint was trained with
-# (see experiments/2026-06-01 CAMELYON-UNI2-ABMIL.ipynb).
-EMBEDDING_DIM = 1536
-HIDDEN_DIM = EMBEDDING_DIM // 4
-ATTENTION_BRANCHES = 3
+# Defaults match the original full-embedding (fraction=1.0) checkpoint; pass
+# --embedding-dim/--hidden-dim/--attention-branches explicitly for any
+# checkpoint trained with different values (e.g. experiment-feature-fraction-
+# sweep.py's fraction<1.0 checkpoints, which vary --embedding-dim by fraction
+# but keep hidden_dim fixed at 384 -- see src/camelyon16_training.py).
+DEFAULT_EMBEDDING_DIM = 1536
+DEFAULT_HIDDEN_DIM = 384
+DEFAULT_ATTENTION_BRANCHES = 3
 ATTENTION_MODE = "simple"
 
 # openslide.mpp-x / mpp-y read directly off a CAMELYON16 slide (level 0).
@@ -33,13 +38,13 @@ ATTENTION_MODE = "simple"
 MICRONS_PER_PIXEL = 0.243094
 
 
-def load_model(checkpoint_path: Path, device: str) -> ABMILite:
+def load_model(checkpoint_path: Path, device: str, embedding_dim: int, hidden_dim: int, attention_branches: int) -> ABMILite:
     model = ABMILite(
-        EMBEDDING_DIM,
-        HIDDEN_DIM,
+        embedding_dim,
+        hidden_dim,
         use_feature_extractor=False,
         feature_extraction_layers=3,
-        attention_branches=ATTENTION_BRANCHES,
+        attention_branches=attention_branches,
         attention_mode=ATTENTION_MODE,
     )
     state_dict = th.load(checkpoint_path, map_location="cpu")
@@ -98,22 +103,40 @@ def main():
     parser.add_argument("-f", "--features-path", type=Path, required=True, help="Slide's extracted features .pt (features/labels/coords).")
     parser.add_argument("-c", "--checkpoint", type=Path, required=True, help="Trained ABMILite state_dict .pt.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if th.cuda.is_available() else "cpu")
+    parser.add_argument("--embedding-dim", type=int, default=DEFAULT_EMBEDDING_DIM, help="Per-instance feature dim the checkpoint was trained with (1536 for full UNI2-H; round(1536*fraction) for a feature-fraction-sweep checkpoint).")
+    parser.add_argument("--hidden-dim", type=int, default=DEFAULT_HIDDEN_DIM, help="Attention hidden layer size the checkpoint was trained with (384 for both the original and sweep checkpoints).")
+    parser.add_argument("--attention-branches", type=int, default=DEFAULT_ATTENTION_BRANCHES)
+    parser.add_argument("--feature-indices", type=Path, default=None, help="Path to a sweep_feature_subset_*.json (from experiment-feature-fraction-sweep.py) giving the fixed dimension subset this checkpoint was trained on. Required for any fraction<1.0 checkpoint; leave unset for the full-embedding (fraction=1.0) checkpoint.")
     parser.add_argument("--opacity", type=float, default=0.6, help="Layer opacity for the attention/logit overlays.")
     parser.add_argument("--colormap", type=str, default="magma", help="napari colormap for attention intensity.")
     parser.add_argument("--logit-colormap", type=str, default="coolwarm", help="napari colormap for instance logit (diverging, centered at 0).")
     parser.add_argument("--edge-color", type=str, default="white", help="Outline color for the edges-only 'tile edges' layer.")
     parser.add_argument("--edge-width", type=float, default=1.0, help="Outline width for the edges-only 'tile edges' layer.")
+    parser.add_argument("--no-annotations", action="store_true", help="Skip loading the tumor annotation overlay (on by default).")
+    parser.add_argument("--fill-tumor-annotation", action="store_true", help="Fill the tumor annotation polygon interior (translucent) instead of outline-only.")
+    parser.add_argument("--attn-vmin", type=float, default=None, help="Fixed lower bound for the attention colorbar, e.g. for a shared range across multiple WSIs/checkpoints. Default: this slide's own attention.min().")
+    parser.add_argument("--attn-vmax", type=float, default=None, help="Fixed upper bound for the attention colorbar. Default: this slide's own attention.max(). See utils-attention-value-range.py to compute a sensible global (vmin, vmax) across many slides/checkpoints first.")
+    parser.add_argument("--logit-abs-max", type=float, default=None, help="Fixed symmetric bound for the instance-logit colorbar (range is [-this, +this], centered at 0). Default: this slide's own abs(logit).max().")
     args = parser.parse_args()
 
     data = th.load(args.features_path, map_location="cpu")
     features, coords = data["features"], data["coords"]
 
-    model = load_model(args.checkpoint, args.device)
+    if args.feature_indices is not None:
+        with open(args.feature_indices, "r") as f:
+            indices = th.tensor(json.load(f), dtype=th.long)
+        features = features.index_select(1, indices)
+
+    model = load_model(args.checkpoint, args.device, args.embedding_dim, args.hidden_dim, args.attention_branches)
     attention = compute_attention(model, features, args.device)
     instance_logits = compute_instance_logits(model, features, args.device)
 
     viewer = napari.Viewer()
-    load_big_wsi_v2(viewer, args.wsi_path, with_annotations=False)
+    load_big_wsi_v2(
+        viewer, args.wsi_path,
+        with_annotations=not args.no_annotations,
+        tumor_annotation_fill=args.fill_tumor_annotation,
+    )
 
     # Tag the WSI layer with physical pixel size so the scale bar reads in
     # real units instead of raw pixels.
@@ -121,8 +144,21 @@ def main():
     image_layer.scale = (MICRONS_PER_PIXEL, MICRONS_PER_PIXEL)
     image_layer.units = ("um", "um")
 
+    # load_tumor_annotation_xml (called inside load_big_wsi_v2, before the
+    # image layer's scale is set above) adds its shapes layer at the napari
+    # default scale=1/no units -- since its polygon coordinates are raw
+    # level-0 pixels like everything else here, it needs the same
+    # micron-per-pixel scale/units the image and attention/logit/edge layers
+    # below get, or it renders offset by 1/MICRONS_PER_PIXEL (~4x) from the
+    # tissue and napari flags the mismatched units.
+    if "tumor annotation" in viewer.layers:
+        tumor_layer = viewer.layers["tumor annotation"]
+        tumor_layer.scale = (MICRONS_PER_PIXEL, MICRONS_PER_PIXEL)
+        tumor_layer.units = ("um", "um")
+
     rectangles = coords_to_rectangles(coords)
-    vmin, vmax = float(attention.min()), float(attention.max())
+    vmin = args.attn_vmin if args.attn_vmin is not None else float(attention.min())
+    vmax = args.attn_vmax if args.attn_vmax is not None else float(attention.max())
 
     viewer.add_shapes(
         rectangles,
@@ -142,7 +178,7 @@ def main():
     # Instance logit overlay (positive leans tumor, negative leans benign),
     # hidden by default -- toggle on in the layer list. Colormap is centered
     # at 0 since the sign is meaningful, unlike attention.
-    logit_abs_max = float(np.abs(instance_logits).max())
+    logit_abs_max = args.logit_abs_max if args.logit_abs_max is not None else float(np.abs(instance_logits).max())
     logit_vmin, logit_vmax = -logit_abs_max, logit_abs_max
     viewer.add_shapes(
         rectangles,
