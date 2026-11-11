@@ -54,6 +54,7 @@ from sklearn.mixture import BayesianGaussianMixture as BGM
 
 import seaborn as sns
 from matplotlib import pyplot as plt
+from matplotlib.lines import Line2D
 
 # >> Settings for plots
 plt.style.use("default")
@@ -405,24 +406,31 @@ grid_points = np.c_[xx.ravel(), yy.ravel()]
 Z = bgm.predict(grid_points)
 Z = Z.reshape(xx.shape)
 
-# Draw the colored cluster boundaries/regions
-_mask = attention > -np.inf
+# >> Random draw order, so that the last patients do not cover the others
+order = np.random.permutation(len(labels))
+outcome = np.where(labels[order] == 1, "Aggressive", "Benign")
+hue_kwargs = {"hue" : outcome, "hue_order" : ["Benign", "Aggressive"]}
 
 # 1. Initialize the grid
 g = sns.JointGrid(
-    x=za_mx_scaled[_mask,0],
-    y=za_mx_scaled[_mask,1],
+    x=za_mx_scaled[order,0],
+    y=za_mx_scaled[order,1],
     height = 10
 )
 
 # 2. Draw scatter plot in center
-g.plot_joint(sns.scatterplot, hue=labels[_mask], s = 10, alpha = 0.5)
+g.plot_joint(sns.scatterplot, **hue_kwargs, s = 8, alpha = 0.3, linewidth = 0, legend = False)
 g.ax_joint.contour(xx,yy,Z,colors='k', linewidths=1)
-xlim = g.ax_joint.get_xlim()
-ylim = g.ax_joint.get_ylim()
+g.ax_joint.legend(
+    handles = [
+        Line2D([], [], color = c, marker = "o", linestyle = "", markersize = 8, label = k)
+        for k, c in zip(["Benign", "Aggressive"], sns.color_palette())
+    ],
+    loc = "lower right"
+)
 
 # 3. Draw ONLY KDE curves on the outside
-g.plot_marginals(sns.kdeplot, fill=True, hue=labels[_mask])
+g.plot_marginals(sns.kdeplot, fill=True, **hue_kwargs)
 g.set_axis_labels(
     "Instance Classifier-head Logit (Z-scaled)",
     "Instance Attention Weight (Z-scaled)",
