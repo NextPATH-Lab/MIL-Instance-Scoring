@@ -94,6 +94,21 @@ def append_row(csv_path: Path, row: dict) -> None:
             writer.writeheader()
         writer.writerow(row)
 
+def noise_pad_stats(train_files: np.ndarray, device: str, every: int = 5) -> tuple[th.Tensor, th.Tensor]:
+    """Per-dimension (mean, std) of the instance embeddings of every `every`-th training
+    slide (sorted by name); computed once and saved to OUTPUTS_DIR."""
+    path = OUTPUTS_DIR / "noise_pad_stats.pt"
+    if not path.exists():
+        n, s, s2 = 0, 0.0, 0.0
+        for f in tqdm(sorted(train_files)[::every], "Noise statistics"):
+            x = th.load(f, weights_only = True, map_location = device)["features"].double()
+            n, s, s2 = n + x.shape[0], s + x.sum(0), s2 + (x ** 2).sum(0)
+        mean = s / n
+        th.save({"mean": mean.float().cpu(), "std": (s2 / n - mean ** 2).sqrt().float().cpu(), "n": n}, path)
+    stats = th.load(path)
+    log.info("Noise statistics from %d instances (%s)", stats["n"], path)
+    return stats["mean"], stats["std"]
+
 def main():
     cli = argparse.ArgumentParser(description = "Sweep CAMELYON16 ABMILite across feature fractions (approach 2), nested feature x model replicate seeds for error bars.")
     cli.add_argument("--embeds-dir", type = Path, default = None, help = "Directory of per-slide embeddings. Defaults to CAMELYON16_EMBEDS_DIR.")
@@ -108,12 +123,17 @@ def main():
     cli.add_argument("--za-plot-model-version", type = int, default = 0, help = "Which model_version (within --za-plot-feature-version) gets the representative za-space scatter.")
     cli.add_argument("--max-bag-size", type = int, default = None, help = "Cap on instances per training bag (stratified subsample). None = no cap. See CAMELYON16UNI2Embeddings._stratified_sample.")
     cli.add_argument("--min-tumor-fraction", type = float, default = 0.01, help = "Floor on tumor-instance fraction kept when subsampling via --max-bag-size; ignored if --max-bag-size is None.")
+    cli.add_argument("--noise-pad", action = "store_true", help = "Keep all --embedding-dim inputs and fill the masked dimensions with Gaussian noise (per-dimension mean and std of the training slides), so the parameter count does not change with the fraction (JMI-260453 major 5A). Needs --output-tag.")
+    cli.add_argument("--output-tag", type = str, default = "", help = "Suffix of the CSV, the checkpoint folder and the za plots, so that a variant run does not touch the original outputs.")
     cli.add_argument("--device", type = str, default = "cuda" if th.cuda.is_available() else "cpu")
     args = cli.parse_args()
 
     embeds_dir = args.embeds_dir or Path(os.getenv("CAMELYON16_EMBEDS_DIR"))
-    csv_path = OUTPUTS_DIR / "feature_fraction_sweep.csv"
-    checkpoint_dir = OUTPUTS_DIR / "sweep_checkpoints"
+    if args.noise_pad and not args.output_tag:
+        cli.error("--noise-pad needs --output-tag")
+    tag = f"_{args.output_tag}" if args.output_tag else ""
+    csv_path = OUTPUTS_DIR / f"feature_fraction_sweep{tag}.csv"
+    checkpoint_dir = OUTPUTS_DIR / f"sweep_checkpoints{tag}"
     checkpoint_dir.mkdir(exist_ok = True, parents = True)
 
     os.environ["PYTHONHASHSEED"] = str(args.base_seed)
@@ -126,6 +146,7 @@ def main():
     test_files = np.array([x for x in data_dir if x.stem.startswith("test_")])
 
     completed = load_completed(csv_path)
+    noise_stats = noise_pad_stats(train_files, args.device) if args.noise_pad else None
 
     # Build the full (fraction, feature_version, model_version) trial list.
     # fraction=1.0 gets only 1 feature version (the subset axis is
@@ -156,19 +177,20 @@ def main():
 
         feature_subset_path = CONFIG_DIR / f"sweep_feature_subset_{embeds_dir.name}_frac{frac}_fv{fv}.json"
         za_plot_path = (
-            OUTPUTS_DIR / "figures" / f"camelyon16-uni2-za-plot_{embeds_dir.name}_frac{frac}.png"
+            OUTPUTS_DIR / "figures" / f"camelyon16-uni2-za-plot_{embeds_dir.name}_frac{frac}{tag}.png"
             if fv == args.za_plot_feature_version and mv == args.za_plot_model_version else None
         )
         checkpoint_path = checkpoint_dir / f"abmilite_{embeds_dir.name}_frac{frac}_fv{fv}_mv{mv}.pt"
 
         metrics = run_one_trial(
             train_files, test_files,
-            embedding_dim = round(args.embedding_dim * frac),
+            embedding_dim = args.embedding_dim if args.noise_pad else round(args.embedding_dim * frac),
             seed = trial_seed, epochs = args.epochs, lr = args.lr,
             feature_fraction = frac, feature_subset_path = feature_subset_path,
             feature_subset_seed = feature_seed,
             max_bag_size = args.max_bag_size, min_tumor_fraction = args.min_tumor_fraction,
             device = args.device, za_plot_path = za_plot_path, checkpoint_path = checkpoint_path,
+            noise_stats = noise_stats,
         )
 
         row = {

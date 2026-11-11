@@ -3,6 +3,7 @@
 """
 import os
 import json
+import zlib
 import logging
 from pathlib import Path
 from typing import Union, Literal, Optional
@@ -185,6 +186,7 @@ class CAMELYON16UNI2Embeddings(Dataset):
             feature_fraction: Optional[float] = None,
             feature_subset_path: Optional[Path] = None,
             feature_subset_seed: Optional[int] = None,
+            noise_stats: Optional[tuple[th.Tensor, th.Tensor]] = None,
     ) -> None:
         """Load in directory of data as PyTorch dataset.
 
@@ -233,6 +235,14 @@ class CAMELYON16UNI2Embeddings(Dataset):
                 time the subset is generated (i.e. when `feature_subset_path`
                 doesn't exist yet). Irrelevant on every subsequent load, since
                 the saved indices are reused as-is.
+            noise_stats (Optional[tuple[Tensor, Tensor]]): Per-dimension
+                (mean, std) of the full embedding. If set with
+                `feature_fraction`, the input keeps all dimensions and the
+                masked ones get Gaussian noise of that mean and std, so the
+                parameter count stays that of the full model (capacity
+                control, JMI-260453 major 5A). The noise is fixed for each
+                slide (seeded by the file name) and comes from its own
+                generator, so the global random stream does not change.
         """
         # If `directory` is NOT a Path object, it is assumed to be a
         # pre-filtered list of files (Path objects)
@@ -247,6 +257,7 @@ class CAMELYON16UNI2Embeddings(Dataset):
         self.max_bag_size = max_bag_size
         self.min_tumor_fraction = min_tumor_fraction
 
+        self.noise_stats = noise_stats
         self.feature_indices = None
         if feature_fraction is not None:
             if feature_subset_path is None:
@@ -352,7 +363,14 @@ class CAMELYON16UNI2Embeddings(Dataset):
         instance_labels = data['labels']
         embeddings = data['features']
 
-        if self.feature_indices is not None:
+        if self.feature_indices is not None and self.noise_stats is not None:
+            mean, std = (x.to(embeddings.device) for x in self.noise_stats)
+            gen = th.Generator(device = embeddings.device).manual_seed(zlib.crc32(self.files[idx].name.encode()))
+            noise = mean + std * th.randn(embeddings.shape, generator = gen, device = embeddings.device)
+            idx_keep = self.feature_indices.to(embeddings.device)
+            noise[:, idx_keep] = embeddings[:, idx_keep].float()
+            embeddings = noise
+        elif self.feature_indices is not None:
             embeddings = embeddings.index_select(1, self.feature_indices)
 
         if self.max_bag_size is not None:

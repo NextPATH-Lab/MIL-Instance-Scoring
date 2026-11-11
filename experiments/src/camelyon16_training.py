@@ -58,6 +58,7 @@ def run_one_trial(
         checkpoint_path: Optional[Path] = None,
         attention_branches: int = 3,
         hidden_dim: int = 384,
+        noise_stats: Optional[tuple[th.Tensor, th.Tensor]] = None,
 ) -> dict:
     """Train ABMILite once (single StratifiedKFold fold, seeded by `seed`)
     and evaluate it, returning a flat dict of bag- and instance-level
@@ -101,7 +102,7 @@ def run_one_trial(
 
     ds_kwargs = dict(
         feature_fraction = feature_fraction, feature_subset_seed = feature_subset_seed,
-        feature_subset_path = feature_subset_path,
+        feature_subset_path = feature_subset_path, noise_stats = noise_stats,
     )
     train_ds = CAMELYON16UNI2Embeddings(
         train_files[train_idx], device = device,
