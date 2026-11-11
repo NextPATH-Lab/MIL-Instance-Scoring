@@ -444,3 +444,37 @@ g.savefig(
     dpi = 300,
     bbox_inches = "tight"
 )
+
+### === Save the Mixture Component of Each Nucleus (JMI-260453: Fig 3B, major 7) === ###
+# Row i of filtered_copy/<id>.csv is row i of <id>.csv after GROUP < 10
+# (utils-ldo-feature-selection.py), so the raw positions can be joined by row.
+joblib.dump(bgm, OUTPUTS_DIR / "ldo-za-bgm.joblib")
+nuclei = []
+for _f in tqdm(data_files, desc = "Mixture components"):
+    pos = (
+        pl.read_csv(TRAINING_DATA_DIR / _f.name, infer_schema_length = None)
+            .filter(pl.col("GROUP") < 10)
+            .select("x_centroid", "y_centroid", "voron_x", "voron_y")
+    )
+    data = pl.concat([pl.read_csv(_f), pos], how = "horizontal").with_row_index("row")
+    assert data["BiopsyID"].equals(pl.read_csv(TRAINING_DATA_DIR / _f.name, infer_schema_length = None).filter(pl.col("GROUP") < 10)["BiopsyID"])
+    data = data.filter(pl.col("Visit_No") == 1)
+    x = data.select(feature_names).to_torch().float().to(DEVICE)
+    with th.no_grad():
+        z = abmilite(x, mode = 'instance').squeeze(-1).cpu().numpy().ravel()
+        a = abmilite.attention_module(x, softmax = False, transpose = False).cpu().numpy().ravel()
+    za = za_scaler.transform(np.stack([z, a], axis = 1))
+    proba = bgm.predict_proba(za)
+    nuclei.append(
+        data.select("row", "BiopsyID", "DW2Y", "x_centroid", "y_centroid", "voron_x", "voron_y")
+            .with_columns(
+                patient_id = pl.lit(int(_f.stem)),
+                split = pl.lit("train" if _f in train_files else "test" if _f in test_files else "none"),
+                z = z, a = a, z_scaled = za[:, 0], a_scaled = za[:, 1],
+                component = proba.argmax(1),
+                **{f"p{k}" : proba[:, k] for k in range(proba.shape[1])}
+            )
+    )
+pl.concat(nuclei).write_csv(OUTPUTS_DIR / "ldo_nucleus_components.csv")
+with open(OUTPUTS_DIR / "ldo-za-bgm-components.json", "w") as f:
+    json.dump({"means_scaled_za" : bgm.means_.tolist(), "weights" : bgm.weights_.tolist()}, f, indent = 4)
